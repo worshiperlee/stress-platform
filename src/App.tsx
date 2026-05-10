@@ -50,6 +50,7 @@ select:focus-visible {
 // ─── Types ───────────────────────────────────────────────
 type AnswerValue = 0 | 1 | 3;
 type CatKey = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H";
+type BigCatKey = "physical" | "emotional" | "workLife" | "selfInsight";
 type Level = "취약" | "보통" | "건강";
 type AppMode = "test" | "dashboard" | "report" | "settings";
 type PeriodPreset = "all" | "30d" | "90d" | "180d" | "365d";
@@ -90,13 +91,36 @@ const CAT_KEYS: CatKey[] = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
 const CAT_NAMES: Record<CatKey, string> = {
   A: "식습관",
-  B: "음주·흡연",
+  B: "금연·금주",
   C: "운동",
   D: "사회적관계",
   E: "성생활",
-  F: "여가·휴식",
-  G: "일·삶균형",
+  F: "여가",
+  G: "일과 가정의 균형",
   H: "자기이해",
+};
+
+const BIG_CAT_KEYS: BigCatKey[] = ["physical", "emotional", "workLife", "selfInsight"];
+
+const BIG_CAT_NAMES: Record<BigCatKey, string> = {
+  physical: "신체관리영역",
+  emotional: "정서관리영역",
+  workLife: "일과 삶의 관리영역",
+  selfInsight: "자기이해영역",
+};
+
+const BIG_CAT_CHILDREN: Record<BigCatKey, CatKey[]> = {
+  physical: ["A", "B", "C"],
+  emotional: ["D", "E"],
+  workLife: ["F", "G"],
+  selfInsight: ["H"],
+};
+
+const BIG_CAT_DESCRIPTIONS: Record<BigCatKey, string> = {
+  physical: "식습관, 금연·금주, 운동을 통해 스트레스에 버틸 수 있는 신체 기반을 점검합니다.",
+  emotional: "사회적 관계와 친밀감의 질을 통해 정서적 지지 자원을 점검합니다.",
+  workLife: "여가와 일·가정 균형을 통해 회복 시간과 생활 균형을 점검합니다.",
+  selfInsight: "자기 신뢰, 마음의 평안, 소속감, 스트레스 대처 경험을 점검합니다.",
 };
 
 const CAT_ADVICE: Record<CatKey, string> = {
@@ -200,6 +224,30 @@ function getLevelStyle(level: Level) {
   if (level === "보통") return { bg: "#FAEEDA", border: "#EF9F27", text: "#633806" };
   return { bg: "#E1F5EE", border: "#5DCAA5", text: "#085041" };
 }
+
+function getBigCategoryStat(bigCat: BigCatKey, scores: Record<CatKey, number>) {
+  const children = BIG_CAT_CHILDREN[bigCat];
+  const total = children.reduce((sum, cat) => sum + scores[cat], 0);
+  const max = children.length * 18;
+  const avg = total / children.length;
+  const level = getLevel(avg);
+  const weakCount = children.filter((cat) => getLevel(scores[cat]) === "취약").length;
+  return {
+    bigCat,
+    label: BIG_CAT_NAMES[bigCat],
+    children,
+    total,
+    max,
+    avg: round1(avg),
+    level,
+    weakCount,
+  };
+}
+
+function getBigCategoryStats(scores: Record<CatKey, number>) {
+  return BIG_CAT_KEYS.map((bigCat) => getBigCategoryStat(bigCat, scores));
+}
+
 
 function getTotalStatus(total: number) {
   if (total >= 112) return { label: "매우 건강", bg: "#E1F5EE", color: "#085041" };
@@ -452,6 +500,14 @@ function buildTrend(results: SavedResult[]) {
     }));
 }
 
+function buildAverageScores(results: SavedResult[]) {
+  const scores = emptyScores();
+  CAT_KEYS.forEach((cat) => {
+    scores[cat] = results.length ? round1(average(results.map((r) => r.scores[cat]))) : 0;
+  });
+  return scores;
+}
+
 function getWeakCategoryRanking(results: SavedResult[]) {
   const counts = CAT_KEYS.reduce((acc, cat) => {
     acc[cat] = 0;
@@ -637,6 +693,60 @@ function CategoryCard({ cat, score }: { cat: CatKey; score: number }) {
   );
 }
 
+function BigCategorySection({ bigCat, scores }: { bigCat: BigCatKey; scores: Record<CatKey, number> }) {
+  const stat = getBigCategoryStat(bigCat, scores);
+  const style = getLevelStyle(stat.level);
+  const pct = Math.min(100, Math.round((stat.total / stat.max) * 100));
+
+  return (
+    <section style={{ background: "#fff", border: "0.5px solid #e0e0e0", borderRadius: 18, padding: 18, display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 16, fontWeight: 850, margin: 0 }}>{stat.label}</h3>
+            <Pill level={stat.level}>{stat.level}</Pill>
+          </div>
+          <p style={{ fontSize: 12, color: "#777", lineHeight: 1.6, margin: 0 }}>{BIG_CAT_DESCRIPTIONS[bigCat]}</p>
+        </div>
+        <div style={{ textAlign: "right", minWidth: 120 }}>
+          <p style={{ fontSize: 11, color: "#999", margin: "0 0 4px" }}>영역 합계</p>
+          <p style={{ fontSize: 26, fontWeight: 850, margin: 0 }}>{stat.total}<span style={{ fontSize: 12, color: "#888", fontWeight: 500 }}> / {stat.max}점</span></p>
+          <p style={{ fontSize: 11, color: "#999", margin: "5px 0 0" }}>하위영역 평균 {stat.avg}점</p>
+        </div>
+      </div>
+
+      <div style={{ height: 6, background: "#f0f0f0", borderRadius: 999, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: style.border, borderRadius: 999 }} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
+        {stat.children.map((cat) => <CategoryCard key={cat} cat={cat} score={scores[cat]} />)}
+      </div>
+    </section>
+  );
+}
+
+function BigCategoryCompactList({ scores }: { scores: Record<CatKey, number> }) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {getBigCategoryStats(scores).map((stat) => {
+        const style = getLevelStyle(stat.level);
+        const pct = Math.min(100, Math.round((stat.total / stat.max) * 100));
+        return (
+          <div key={stat.bigCat} style={{ display: "grid", gridTemplateColumns: "132px 1fr 70px 58px", gap: 10, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "#555", fontWeight: 700 }}>{stat.label}</span>
+            <div style={{ height: 9, borderRadius: 999, background: "#f0f0f0", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${pct}%`, borderRadius: 999, background: style.border }} />
+            </div>
+            <span style={{ fontSize: 12, textAlign: "right", fontWeight: 750 }}>{stat.total}/{stat.max}</span>
+            <Pill level={stat.level}>{stat.level}</Pill>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function AlertBox({ result }: { result: SavedResult | null }) {
   if (!result) return null;
   const weakNames = result.weakCats.map((c) => CAT_NAMES[c]);
@@ -771,6 +881,7 @@ export default function App() {
   const departments = useMemo(() => ["전체", ...Array.from(new Set(results.map((r) => r.dept))).sort()], [results]);
   const deptStats = useMemo(() => buildDeptStats(filteredResults), [filteredResults]);
   const trend = useMemo(() => buildTrend(filteredResults), [filteredResults]);
+  const orgAvgScores = useMemo(() => buildAverageScores(filteredResults), [filteredResults]);
   const weakRank = useMemo(() => getWeakCategoryRanking(filteredResults), [filteredResults]);
   const orgInsight = useMemo(() => getOrgAiInsight(filteredResults, deptStats), [filteredResults, deptStats]);
 
@@ -828,6 +939,11 @@ export default function App() {
         취약영역수: r.weakCats.length,
         취약영역: r.weakCats.map((c) => CAT_NAMES[c]).join(", "),
       };
+      getBigCategoryStats(r.scores).forEach((stat) => {
+        row[`${stat.label} 합계`] = stat.total;
+        row[`${stat.label} 평균`] = stat.avg;
+        row[`${stat.label} 판정`] = stat.level;
+      });
       CAT_KEYS.forEach((c) => {
         row[`${c}.${CAT_NAMES[c]} 점수`] = r.scores[c];
         row[`${c}.${CAT_NAMES[c]} 판정`] = r.levels[c];
@@ -843,6 +959,11 @@ export default function App() {
         주의위험비율: `${d.riskRate}%`,
         평균취약영역수: d.weakAvgCount,
       };
+      getBigCategoryStats(d.catAvg).forEach((stat) => {
+        row[`${stat.label} 평균합계`] = stat.total;
+        row[`${stat.label} 하위평균`] = stat.avg;
+        row[`${stat.label} 판정`] = stat.level;
+      });
       CAT_KEYS.forEach((c) => { row[`${c}.${CAT_NAMES[c]} 평균`] = d.catAvg[c]; });
       return row;
     });
@@ -1044,8 +1165,10 @@ export default function App() {
 
                 <AlertBox result={selectedResult} />
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
-                  {CAT_KEYS.map((cat) => <CategoryCard key={cat} cat={cat} score={selectedResult.scores[cat]} />)}
+                <div style={{ display: "grid", gap: 14 }}>
+                  {BIG_CAT_KEYS.map((bigCat) => (
+                    <BigCategorySection key={bigCat} bigCat={bigCat} scores={selectedResult.scores} />
+                  ))}
                 </div>
 
                 <SectionCard title="AI 자동 해석">
@@ -1156,10 +1279,12 @@ export default function App() {
               <SectionCard title="기간별 평균 총점 변화">
                 <TrendChart trend={trend} />
               </SectionCard>
-              <SectionCard title="취약 영역 랭킹">
-                <SimpleBarChart data={weakRank.map((w) => ({ label: `${w.cat}. ${CAT_NAMES[w.cat]}`, value: w.count }))} max={Math.max(1, filteredResults.length)} />
+              <SectionCard title="4대 관리영역 평균">
+                <BigCategoryCompactList scores={orgAvgScores} />
               </SectionCard>
             </div>
+
+            $1
 
             <SectionCard title="AI 조직개선 제안">
               <p style={{ fontSize: 14, lineHeight: 1.65, color: "#444", margin: "0 0 12px" }}>{orgInsight.summary}</p>
