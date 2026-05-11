@@ -86,6 +86,7 @@ interface DeptStat {
 
 // ─── Local Storage ───────────────────────────────────────
 const storageKey = "stressResults.v2";
+const legacyStorageKeys = ["stressResults", "stressResults.v1"];
 const MIN_DEPT_SAMPLE = 5;
 const db = null;
 
@@ -322,18 +323,64 @@ function getRiskLevel(
   return "낮음";
 }
 
-function loadResults(): SavedResult[] {
+function normalizeSavedResult(raw: any): SavedResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const scores = raw.scores || emptyScores();
+  const levels = raw.levels || calcLevels(scores);
+  const weakCats = raw.weakCats || CAT_KEYS.filter((cat) => levels[cat] === "취약");
+  const createdAt = raw.createdAt || new Date().toISOString();
+  const testDate = raw.testDate || normalizeDateKey(createdAt);
+  const total = Number(raw.total ?? Object.values(scores).reduce((a: number, b: any) => a + Number(b || 0), 0));
+
+  return {
+    id: String(raw.id || uid()),
+    name: String(raw.name || raw.employeeName || "이름 미입력"),
+    dept: String(raw.dept || raw.department || "부서 미입력"),
+    testDate,
+    total,
+    status: String(raw.status || getTotalStatus(total).label),
+    scores,
+    levels,
+    answers: raw.answers || {},
+    weakCats,
+    riskLevel: raw.riskLevel || getRiskLevel(weakCats.length, total, scores),
+    date: String(raw.date || formatDateInputForDisplay(testDate)),
+    createdAt,
+    consent: raw.consent ?? true,
+  };
+}
+
+function readStorageArray(key: string): SavedResult[] {
   try {
-    const raw = localStorage.getItem(storageKey) || "[]";
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeSavedResult).filter(Boolean) as SavedResult[];
   } catch {
     return [];
   }
 }
 
+function dedupeResults(rows: SavedResult[]) {
+  const map = new Map<string, SavedResult>();
+  rows.forEach((row) => map.set(row.id, row));
+  return [...map.values()].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+function loadResults(): SavedResult[] {
+  const rows = dedupeResults([
+    ...readStorageArray(storageKey),
+    ...legacyStorageKeys.flatMap((key) => readStorageArray(key)),
+  ]);
+  if (rows.length) saveResults(rows);
+  return rows;
+}
+
 function saveResults(results: SavedResult[]) {
-  localStorage.setItem(storageKey, JSON.stringify(results));
+  const payload = JSON.stringify(results);
+  localStorage.setItem(storageKey, payload);
+  localStorage.setItem("stressResults", payload);
 }
 
 async function saveResultToCloud(_result: SavedResult) {
@@ -1142,6 +1189,33 @@ export default function App() {
     }
   };
 
+  const isAnonymousResult = (result: SavedResult) => {
+    const name = String(result.name || "").trim();
+    return !result.consent || name === "익명" || name === "이름 미입력" || name === "";
+  };
+
+  const deleteAnonymousResults = async () => {
+    const anonymousRows = results.filter(isAnonymousResult);
+    if (!anonymousRows.length) {
+      alert("삭제할 익명 데이터가 없습니다.");
+      return;
+    }
+    if (!confirm(`익명 또는 이름 미입력 데이터 ${anonymousRows.length}건을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+
+    try {
+      if (db) {
+        await Promise.all(anonymousRows.map((row) => deleteResultFromCloud(row.id)));
+      } else {
+        setResults((prev) => prev.filter((row) => !isAnonymousResult(row)));
+      }
+      if (selectedResult && isAnonymousResult(selectedResult)) setSelectedId("");
+      alert(`${anonymousRows.length}건의 익명 데이터를 삭제했습니다.`);
+    } catch (error) {
+      console.error(error);
+      alert("익명 데이터 삭제 중 오류가 발생했습니다.");
+    }
+  };
+
   return (
     <div style={{ minHeight: "100vh", background: "#fbfbfa", fontFamily: "-apple-system, BlinkMacSystemFont, 'Pretendard', 'Noto Sans KR', sans-serif", color: "#1a1a1a" }}>
       <div style={{ maxWidth: 1120, margin: "0 auto", padding: "32px 20px 56px" }}>
@@ -1440,6 +1514,7 @@ export default function App() {
                   Excel 가져오기
                   <input type="file" accept=".xlsx,.xls" onChange={(e) => importExcel(e.target.files?.[0] || null)} style={{ display: "none" }} />
                 </label>
+                <button onClick={deleteAnonymousResults} style={{ ...btnBase, background: "#fff", border: "0.5px solid #EF9F27", color: "#633806" }}>익명 데이터 삭제</button>
                 <button onClick={clearAllStored} style={{ ...btnBase, background: "#fff", border: "0.5px solid #F09595", color: "#791F1F" }}>저장 데이터 전체 삭제</button>
               </div>
               <p style={{ fontSize: 12, color: "#999", lineHeight: 1.6, margin: "12px 0 0" }}>
@@ -1461,13 +1536,13 @@ export default function App() {
               </div>
             </SectionCard>
 
-            <SectionCard title="저장된 결과 목록">
+            <SectionCard title="저장된 결과 목록" right={<span style={{ fontSize: 12, color: "#999" }}>익명/이름 미입력 {results.filter(isAnonymousResult).length}건</span>}>
               <div style={{ display: "grid", gap: 8 }}>
                 {results.slice(0, 30).map((r) => (
                   <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, alignItems: "center", background: "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
                     <div>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: 13 }}>{r.name} · {r.dept}</p>
-                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.total}점 · {r.riskLevel}</p>
+                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.total}점 · {r.riskLevel}{isAnonymousResult(r) ? " · 익명/이름 미입력" : ""}</p>
                     </div>
                     <button onClick={() => { setSelectedId(r.id); setMode("report"); }} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>보기</button>
                     <button onClick={() => deleteResult(r.id)} style={{ border: "0.5px solid #F09595", color: "#791F1F", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>삭제</button>
