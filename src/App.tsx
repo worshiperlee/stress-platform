@@ -88,6 +88,7 @@ interface DeptStat {
 const storageKey = "stressResults.v2";
 const legacyStorageKeys = ["stressResults", "stressResults.v1"];
 const MIN_DEPT_SAMPLE = 5;
+const RESULT_PAGE_SIZE = 30;
 const db = null;
 
 // ─── Data ────────────────────────────────────────────────
@@ -910,6 +911,7 @@ export default function App() {
   const [resetVersion, setResetVersion] = useState(0);
   const [cloudStatus, setCloudStatus] = useState<"local" | "connecting" | "connected" | "error">(db ? "connecting" : "local");
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
+  const [resultPage, setResultPage] = useState(1);
 
   useEffect(() => {
     const tag = document.createElement("style");
@@ -950,6 +952,16 @@ export default function App() {
   const orgAvgScores = useMemo(() => buildAverageScores(filteredResults), [filteredResults]);
   const weakRank = useMemo(() => getWeakCategoryRanking(filteredResults), [filteredResults]);
   const orgInsight = useMemo(() => getOrgAiInsight(filteredResults, deptStats), [filteredResults, deptStats]);
+  const resultPageCount = Math.max(1, Math.ceil(results.length / RESULT_PAGE_SIZE));
+  const safeResultPage = Math.min(resultPage, resultPageCount);
+  const paginatedResults = useMemo(() => {
+    const start = (safeResultPage - 1) * RESULT_PAGE_SIZE;
+    return results.slice(start, start + RESULT_PAGE_SIZE);
+  }, [results, safeResultPage]);
+
+  useEffect(() => {
+    if (resultPage > resultPageCount) setResultPage(resultPageCount);
+  }, [resultPage, resultPageCount]);
 
   const btnBase: React.CSSProperties = { fontSize: 14, padding: "10px 18px", borderRadius: 10, cursor: "pointer", border: "none", fontWeight: 700, transition: "opacity 0.15s", touchAction: "manipulation" };
 
@@ -1224,7 +1236,8 @@ export default function App() {
   };
 
   const selectVisibleResults = () => {
-    setSelectedDeleteIds(results.slice(0, 30).map((row) => row.id));
+    const pageIds = paginatedResults.map((row) => row.id);
+    setSelectedDeleteIds((prev) => Array.from(new Set([...prev, ...pageIds])));
   };
 
   const clearDeleteSelection = () => {
@@ -1575,14 +1588,28 @@ export default function App() {
               </div>
             </SectionCard>
 
-            <SectionCard title="저장된 결과 목록" right={<span style={{ fontSize: 12, color: "#999" }}>익명/이름 미입력 {results.filter(isAnonymousResult).length}건 · 선택 {selectedDeleteIds.length}건</span>}>
+            <SectionCard title="저장된 결과 목록" right={<span style={{ fontSize: 12, color: "#999" }}>전체 {results.length}건 · 익명/이름 미입력 {results.filter(isAnonymousResult).length}건 · 선택 {selectedDeleteIds.length}건</span>}>
               <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-                <button onClick={selectVisibleResults} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 12, cursor: "pointer" }}>화면 목록 전체 선택</button>
+                <button onClick={selectVisibleResults} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 12, cursor: "pointer" }}>현재 페이지 전체 선택</button>
                 <button onClick={clearDeleteSelection} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 12, cursor: "pointer" }}>선택 해제</button>
                 <button onClick={deleteSelectedResults} style={{ border: "0.5px solid #EF9F27", background: selectedDeleteIds.length ? "#FAEEDA" : "#fff", color: "#633806", borderRadius: 8, padding: "7px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>선택 삭제</button>
               </div>
+
+              <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10, background: "#f8f8f8", borderRadius: 12, padding: "9px 12px" }}>
+                <span style={{ fontSize: 12, color: "#777", fontWeight: 700 }}>
+                  {results.length ? `${(safeResultPage - 1) * RESULT_PAGE_SIZE + 1}-${Math.min(safeResultPage * RESULT_PAGE_SIZE, results.length)}건 표시` : "표시할 데이터 없음"} / 전체 {results.length}건
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <button onClick={() => setResultPage(1)} disabled={safeResultPage === 1} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "6px 9px", cursor: safeResultPage === 1 ? "not-allowed" : "pointer", opacity: safeResultPage === 1 ? 0.4 : 1 }} title="첫 페이지">⏮</button>
+                  <button onClick={() => setResultPage((p) => Math.max(1, p - 1))} disabled={safeResultPage === 1} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "6px 9px", cursor: safeResultPage === 1 ? "not-allowed" : "pointer", opacity: safeResultPage === 1 ? 0.4 : 1 }} title="이전 페이지">◀</button>
+                  <span style={{ minWidth: 62, textAlign: "center", fontSize: 12, color: "#555", fontWeight: 800 }}>{safeResultPage} / {resultPageCount}</span>
+                  <button onClick={() => setResultPage((p) => Math.min(resultPageCount, p + 1))} disabled={safeResultPage === resultPageCount} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "6px 9px", cursor: safeResultPage === resultPageCount ? "not-allowed" : "pointer", opacity: safeResultPage === resultPageCount ? 0.4 : 1 }} title="다음 페이지">▶</button>
+                  <button onClick={() => setResultPage(resultPageCount)} disabled={safeResultPage === resultPageCount} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "6px 9px", cursor: safeResultPage === resultPageCount ? "not-allowed" : "pointer", opacity: safeResultPage === resultPageCount ? 0.4 : 1 }} title="마지막 페이지">⏭</button>
+                </div>
+              </div>
+
               <div style={{ display: "grid", gap: 8 }}>
-                {results.slice(0, 30).map((r) => (
+                {paginatedResults.map((r) => (
                   <div key={r.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: 10, alignItems: "center", background: selectedDeleteIds.includes(r.id) ? "#FAEEDA" : "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
                     <input type="checkbox" checked={selectedDeleteIds.includes(r.id)} onChange={() => toggleDeleteSelection(r.id)} aria-label={`${r.name} 결과 선택`} style={{ width: 18, height: 18 }} />
                     <div>
