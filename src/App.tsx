@@ -1,18 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
-import { initializeApp } from "firebase/app";
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDocs,
-  getFirestore,
-  onSnapshot,
-  orderBy,
-  query,
-  setDoc,
-  writeBatch,
-} from "firebase/firestore";
 
 // =========================================================
 // 스트레스 취약성 검사 시스템
@@ -97,31 +84,10 @@ interface DeptStat {
   catAvg: Record<CatKey, number>;
 }
 
-// ─── Firebase ────────────────────────────────────────────
+// ─── Local Storage ───────────────────────────────────────
 const storageKey = "stressResults.v2";
-const RESULTS_COLLECTION = "stressResults";
 const MIN_DEPT_SAMPLE = 5;
-
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-};
-
-const isFirebaseConfigured = Boolean(
-  firebaseConfig.apiKey &&
-  firebaseConfig.authDomain &&
-  firebaseConfig.projectId &&
-  firebaseConfig.storageBucket &&
-  firebaseConfig.messagingSenderId &&
-  firebaseConfig.appId
-);
-
-const firebaseApp = isFirebaseConfigured ? initializeApp(firebaseConfig) : null;
-const db = firebaseApp ? getFirestore(firebaseApp) : null;
+const db = null;
 
 // ─── Data ────────────────────────────────────────────────
 const CAT_KEYS: CatKey[] = ["A", "B", "C", "D", "E", "F", "G", "H"];
@@ -370,29 +336,20 @@ function saveResults(results: SavedResult[]) {
   localStorage.setItem(storageKey, JSON.stringify(results));
 }
 
-async function saveResultToCloud(result: SavedResult) {
-  if (!db) return;
-  await setDoc(doc(db, RESULTS_COLLECTION, result.id), result);
+async function saveResultToCloud(_result: SavedResult) {
+  return;
 }
 
-async function saveManyResultsToCloud(results: SavedResult[]) {
-  if (!db || results.length === 0) return;
-  const batch = writeBatch(db);
-  results.forEach((result) => batch.set(doc(db, RESULTS_COLLECTION, result.id), result));
-  await batch.commit();
+async function saveManyResultsToCloud(_results: SavedResult[]) {
+  return;
 }
 
-async function deleteResultFromCloud(id: string) {
-  if (!db) return;
-  await deleteDoc(doc(db, RESULTS_COLLECTION, id));
+async function deleteResultFromCloud(_id: string) {
+  return;
 }
 
 async function clearCloudResults() {
-  if (!db) return;
-  const snapshot = await getDocs(collection(db, RESULTS_COLLECTION));
-  const batch = writeBatch(db);
-  snapshot.docs.forEach((item) => batch.delete(item.ref));
-  await batch.commit();
+  return;
 }
 
 function filterByPeriod(results: SavedResult[], preset: PeriodPreset) {
@@ -910,34 +867,9 @@ export default function App() {
     const tag = document.createElement("style");
     tag.innerHTML = printStyle;
     document.head.appendChild(tag);
-
-    if (!db) {
-      setResults(loadResults());
-      setCloudStatus("local");
-      return () => { document.head.removeChild(tag); };
-    }
-
-    setCloudStatus("connecting");
-    const q = query(collection(db, RESULTS_COLLECTION), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const cloudResults = snapshot.docs.map((item) => item.data() as SavedResult);
-        setResults(cloudResults);
-        saveResults(cloudResults);
-        setCloudStatus("connected");
-      },
-      (error) => {
-        console.error("Firestore sync error", error);
-        setResults(loadResults());
-        setCloudStatus("error");
-      }
-    );
-
-    return () => {
-      unsubscribe();
-      document.head.removeChild(tag);
-    };
+    setResults(loadResults());
+    setCloudStatus("local");
+    return () => { document.head.removeChild(tag); };
   }, []);
 
   useEffect(() => {
@@ -1219,7 +1151,7 @@ export default function App() {
               <div style={{ width: 44, height: 44, borderRadius: 14, background: "#E1F5EE", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>🧠</div>
               <div>
                 <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>스트레스 취약성 검사 시스템</h1>
-                <p style={{ fontSize: 13, color: "#888", margin: "5px 0 0", lineHeight: 1.5 }}>48문항 · 4대 관리영역 · 개인 리포트 · 조직 분석 · 클라우드 저장</p>
+                <p style={{ fontSize: 13, color: "#888", margin: "5px 0 0", lineHeight: 1.5 }}>48문항 · 4대 관리영역 · 개인 리포트 · 조직 분석 · 로컬 저장</p>
               </div>
             </div>
           </div>
@@ -1518,7 +1450,7 @@ export default function App() {
             <SectionCard title="클라우드 연결 상태">
               <div style={{ background: "#f8f8f8", borderRadius: 14, padding: 16 }}>
                 <p style={{ fontSize: 13, lineHeight: 1.7, color: "#555", margin: 0 }}>
-                  상단 상태가 <b>☁️ 클라우드 연결</b>이면 여러 기기에서 검사 결과가 같은 Firestore 데이터베이스에 저장됩니다. 환경변수가 없으면 자동으로 로컬 저장 모드로 작동합니다.
+                  현재 버전은 Firebase 없이 브라우저 localStorage에 저장됩니다. 같은 기기와 같은 브라우저에서는 데이터가 유지되지만, 다른 기기와 자동 동기화되지는 않습니다. Firebase 연결은 다음 단계에서 별도로 진행하면 됩니다.
                 </p>
               </div>
             </SectionCard>
