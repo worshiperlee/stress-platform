@@ -63,6 +63,7 @@ interface SavedResult {
   name: string;
   dept: string;
   testDate: string;
+  ageGroup: string;
   total: number;
   status: string;
   scores: Record<CatKey, number>;
@@ -93,6 +94,7 @@ const db = null;
 
 // ─── Data ────────────────────────────────────────────────
 const CAT_KEYS: CatKey[] = ["A", "B", "C", "D", "E", "F", "G", "H"];
+const AGE_GROUPS = ["응답하지 않음", "20대 이하", "30대", "40대", "50대", "60대 이상"];
 
 const CAT_NAMES: Record<CatKey, string> = {
   A: "식습관",
@@ -338,6 +340,7 @@ function normalizeSavedResult(raw: any): SavedResult | null {
     name: String(raw.name || raw.employeeName || "이름 미입력"),
     dept: String(raw.dept || raw.department || "부서 미입력"),
     testDate,
+    ageGroup: String(raw.ageGroup || raw["연령대"] || "응답하지 않음"),
     total,
     status: String(raw.status || getTotalStatus(total).label),
     scores,
@@ -427,6 +430,7 @@ function makeResult(params: {
   name: string;
   dept: string;
   testDate: string;
+  ageGroup: string;
   answers: Record<number, AnswerValue>;
   consent: boolean;
   previousResult?: SavedResult | null;
@@ -442,6 +446,7 @@ function makeResult(params: {
     name: params.name.trim() || "이름 미입력",
     dept: params.dept.trim() || "부서 미입력",
     testDate: params.testDate || todayDateInputValue(),
+    ageGroup: params.ageGroup || "응답하지 않음",
     total,
     status: totalStatus.label,
     scores,
@@ -486,6 +491,21 @@ function buildDeptStats(results: SavedResult[]): DeptStat[] {
       };
     })
     .sort((a, b) => b.riskRate - a.riskRate || a.avgTotal - b.avgTotal);
+}
+
+function buildAgeGroupStats(results: SavedResult[]) {
+  return AGE_GROUPS.map((ageGroup) => {
+    const rows = results.filter((r) => (r.ageGroup || "응답하지 않음") === ageGroup);
+    const riskCount = rows.filter((r) => r.riskLevel === "위험" || r.riskLevel === "주의").length;
+    const weakCounts = CAT_KEYS.map((cat) => ({ cat, count: rows.filter((r) => r.weakCats.includes(cat)).length })).sort((a, b) => b.count - a.count);
+    return {
+      ageGroup,
+      count: rows.length,
+      avgTotal: rows.length ? round1(average(rows.map((r) => r.total))) : 0,
+      riskRate: rows.length ? round1((riskCount / rows.length) * 100) : 0,
+      topWeak: weakCounts[0]?.count ? `${weakCounts[0].cat}. ${CAT_NAMES[weakCounts[0].cat]}` : "-",
+    };
+  }).filter((row) => row.count > 0);
 }
 
 function buildTrend(results: SavedResult[]) {
@@ -901,6 +921,7 @@ export default function App() {
   const [name, setName] = useState("");
   const [dept, setDept] = useState("");
   const [testDate, setTestDate] = useState(todayDateInputValue());
+  const [ageGroup, setAgeGroup] = useState("응답하지 않음");
   const [consent, setConsent] = useState(true);
   const [answers, setAnswers] = useState<Record<number, AnswerValue>>({});
   const [results, setResults] = useState<SavedResult[]>([]);
@@ -912,6 +933,7 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState<"local" | "connecting" | "connected" | "error">(db ? "connecting" : "local");
   const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
   const [resultPage, setResultPage] = useState(1);
+  const [editingId, setEditingId] = useState("");
 
   useEffect(() => {
     const tag = document.createElement("style");
@@ -932,8 +954,8 @@ export default function App() {
 
   const previewResult = useMemo(() => {
     if (!answeredCount) return null;
-    return makeResult({ name, dept, testDate, answers, consent, previousResult: findPreviousResult(results, name, dept) });
-  }, [name, dept, testDate, answers, consent, answeredCount, results]);
+    return makeResult({ name, dept, testDate, ageGroup, answers, consent, previousResult: findPreviousResult(results, name, dept) });
+  }, [name, dept, testDate, ageGroup, answers, consent, answeredCount, results]);
 
   const selectedResult = useMemo(() => results.find((r) => r.id === selectedId) || previewResult || results[0] || null, [results, selectedId, previewResult]);
   const selectedPreviousResult = useMemo(() => selectedResult ? findPreviousComparableResult(results, selectedResult) : null, [results, selectedResult]);
@@ -952,6 +974,7 @@ export default function App() {
   const orgAvgScores = useMemo(() => buildAverageScores(filteredResults), [filteredResults]);
   const weakRank = useMemo(() => getWeakCategoryRanking(filteredResults), [filteredResults]);
   const orgInsight = useMemo(() => getOrgAiInsight(filteredResults, deptStats), [filteredResults, deptStats]);
+  const ageGroupStats = useMemo(() => buildAgeGroupStats(filteredResults), [filteredResults]);
   const resultPageCount = Math.max(1, Math.ceil(results.length / RESULT_PAGE_SIZE));
   const safeResultPage = Math.min(resultPage, resultPageCount);
   const paginatedResults = useMemo(() => {
@@ -980,16 +1003,19 @@ export default function App() {
       return;
     }
 
-    const result = makeResult({ name, dept, testDate, answers, consent, previousResult: findPreviousResult(results, name, dept) });
+    const previousStored = editingId ? results.find((r) => r.id === editingId) : null;
+    const newResult = makeResult({ name, dept, testDate, ageGroup, answers, consent, previousResult: findPreviousResult(results.filter((r) => r.id !== editingId), name, dept) });
+    const result = editingId && previousStored ? { ...newResult, id: previousStored.id, createdAt: previousStored.createdAt } : newResult;
     try {
       if (db) {
         await saveResultToCloud(result);
       } else {
-        setResults((prev) => [result, ...prev]);
+        setResults((prev) => editingId ? prev.map((row) => row.id === editingId ? result : row) : [result, ...prev]);
       }
       setSelectedId(result.id);
+      setEditingId("");
       setMode("report");
-      alert(db ? "검사 결과가 클라우드에 저장되었습니다." : "검사 결과가 이 기기에 저장되었습니다.");
+      alert(editingId ? "검사 결과가 수정되었습니다." : db ? "검사 결과가 클라우드에 저장되었습니다." : "검사 결과가 이 기기에 저장되었습니다.");
     } catch (error) {
       console.error(error);
       alert("저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
@@ -1004,7 +1030,9 @@ export default function App() {
     setName("");
     setDept("");
     setTestDate(todayDateInputValue());
+    setAgeGroup("응답하지 않음");
     setConsent(true);
+    setEditingId("");
     setResetVersion((v) => v + 1);
   };
 
@@ -1030,6 +1058,7 @@ export default function App() {
         ID: r.id,
         이름: r.consent ? r.name : "익명",
         부서: r.dept,
+        연령대: r.ageGroup || "응답하지 않음",
         날짜: r.date,
         검사일: r.testDate || getResultDateKey(r),
         생성시각: r.createdAt,
@@ -1132,6 +1161,7 @@ export default function App() {
         name: String(row["이름"] || "이름 미입력"),
         dept: String(row["부서"] || "부서 미입력"),
         testDate: testDateValue,
+        ageGroup: String(row["연령대"] || row["ageGroup"] || "응답하지 않음"),
         total,
         status: String(row["총점상태"] || getTotalStatus(total).label),
         scores,
@@ -1170,7 +1200,7 @@ export default function App() {
       const d = new Date();
       d.setDate(d.getDate() - Math.floor(Math.random() * 150));
       const demoDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const result = makeResult({ name: `데모${i + 1}`, dept: depts[i % depts.length], testDate: demoDate, answers: answersObj, consent: false });
+      const result = makeResult({ name: `데모${i + 1}`, dept: depts[i % depts.length], testDate: demoDate, ageGroup: AGE_GROUPS[(i % (AGE_GROUPS.length - 1)) + 1], answers: answersObj, consent: false });
       result.createdAt = d.toISOString();
       result.date = formatDateInputForDisplay(demoDate);
       return result;
@@ -1206,6 +1236,31 @@ export default function App() {
   const isAnonymousResult = (result: SavedResult) => {
     const name = String(result.name || "").trim();
     return !result.consent || name === "익명" || name === "이름 미입력" || name === "";
+  };
+
+  const startEditResult = (result: SavedResult) => {
+    if (!result.answers || Object.keys(result.answers).length < QUESTIONS.length) {
+      alert("이 결과에는 문항별 답변 기록이 부족합니다. 이름, 부서, 연령대는 불러오지만 문항은 다시 확인해야 할 수 있습니다.");
+    }
+    setEditingId(result.id);
+    setName(result.name === "이름 미입력" ? "" : result.name);
+    setDept(result.dept === "부서 미입력" ? "" : result.dept);
+    setTestDate(result.testDate || getResultDateKey(result));
+    setAgeGroup(result.ageGroup || "응답하지 않음");
+    setConsent(result.consent);
+    setAnswers(result.answers || {});
+    setMode("test");
+    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 50);
+  };
+
+  const cancelEdit = () => {
+    setEditingId("");
+    setAnswers({});
+    setName("");
+    setDept("");
+    setTestDate(todayDateInputValue());
+    setAgeGroup("응답하지 않음");
+    setConsent(true);
   };
 
   const deleteAnonymousResults = async () => {
@@ -1301,7 +1356,12 @@ export default function App() {
 
         {mode === "test" && (
           <main style={{ maxWidth: 760, margin: "0 auto" }}>
-            <SectionCard title="응답자 정보" right={<span style={{ fontSize: 12, color: "#999" }}>태블릿 입력 최적화</span>}>
+            {editingId && (
+              <div style={{ background: "#FAEEDA", color: "#633806", borderRadius: 14, padding: "12px 14px", marginBottom: 14, fontSize: 13, fontWeight: 700 }}>
+                저장된 검사 결과를 수정하는 중입니다. 수정 후 아래의 저장 버튼을 누르면 기존 결과가 덮어쓰기 됩니다.
+              </div>
+            )}
+            <SectionCard title={editingId ? "응답자 정보 수정" : "응답자 정보"} right={<span style={{ fontSize: 12, color: "#999" }}>태블릿 입력 최적화</span>}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
                 <label style={{ display: "grid", gap: 6 }}>
                   <span style={{ fontSize: 12, color: "#888", fontWeight: 650 }}>이름</span>
@@ -1314,6 +1374,12 @@ export default function App() {
                 <label style={{ display: "grid", gap: 6 }}>
                   <span style={{ fontSize: 12, color: "#888", fontWeight: 650 }}>검사일</span>
                   <input type="date" value={testDate} onChange={(e) => setTestDate(e.target.value)} style={{ padding: "10px 13px", fontSize: 15, border: "0.5px solid #ddd", borderRadius: 10, outline: "none", background: "#fff" }} />
+                </label>
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ fontSize: 12, color: "#888", fontWeight: 650 }}>연령대</span>
+                  <select value={ageGroup} onChange={(e) => setAgeGroup(e.target.value)} style={{ padding: "10px 13px", fontSize: 15, border: "0.5px solid #ddd", borderRadius: 10, outline: "none", background: "#fff" }}>
+                    {AGE_GROUPS.map((group) => <option key={group} value={group}>{group}</option>)}
+                  </select>
                 </label>
               </div>
               <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "#777", lineHeight: 1.5 }}>
@@ -1340,7 +1406,8 @@ export default function App() {
             </div>
 
             <div className="no-print" style={{ position: "sticky", bottom: 16, display: "flex", gap: 10, marginTop: 28, padding: 12, background: "rgba(255,255,255,0.92)", border: "0.5px solid #e0e0e0", borderRadius: 16, backdropFilter: "blur(8px)", boxShadow: "0 10px 30px rgba(0,0,0,0.08)" }}>
-              <button onClick={saveCurrent} style={{ ...btnBase, background: "#1D9E75", color: "#fff", flex: 1 }}>결과 저장 및 리포트 보기</button>
+              <button onClick={saveCurrent} style={{ ...btnBase, background: "#1D9E75", color: "#fff", flex: 1 }}>{editingId ? "수정 저장 및 리포트 보기" : "결과 저장 및 리포트 보기"}</button>
+              {editingId && <button onClick={cancelEdit} style={{ ...btnBase, background: "#fff", border: "0.5px solid #EF9F27", color: "#633806" }}>수정 취소</button>}
               <button onClick={() => setMode("report")} style={{ ...btnBase, background: "#fff", border: "0.5px solid #ccc", color: "#555" }}>미리보기</button>
               <button onClick={resetAll} style={{ ...btnBase, background: "#fff", border: "0.5px solid #ccc", color: "#555" }}>초기화</button>
             </div>
@@ -1369,7 +1436,7 @@ export default function App() {
                     <div>
                       <p style={{ fontSize: 11, color: "#999", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 5px" }}>개인 검사 결과</p>
                       <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>스트레스 취약성 프로파일</h2>
-                      <p style={{ fontSize: 13, color: "#888", margin: "8px 0 0" }}>{selectedResult.consent ? selectedResult.name : "익명"} · {selectedResult.dept} · 검사일 {selectedResult.date}</p>
+                      <p style={{ fontSize: 13, color: "#888", margin: "8px 0 0" }}>{selectedResult.consent ? selectedResult.name : "익명"} · {selectedResult.dept} · {selectedResult.ageGroup || "응답하지 않음"} · 검사일 {selectedResult.date}</p>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>총점</p>
@@ -1504,6 +1571,34 @@ export default function App() {
               </div>
             </SectionCard>
 
+            <SectionCard title="생애주기별 분석">
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#777", borderBottom: "0.5px solid #ddd" }}>
+                      <th style={{ padding: 10 }}>연령대</th>
+                      <th style={{ padding: 10 }}>건수</th>
+                      <th style={{ padding: 10 }}>평균총점</th>
+                      <th style={{ padding: 10 }}>주의/위험</th>
+                      <th style={{ padding: 10 }}>주요 취약영역</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ageGroupStats.map((row) => (
+                      <tr key={row.ageGroup} style={{ borderBottom: "0.5px solid #eee" }}>
+                        <td style={{ padding: 10, fontWeight: 700 }}>{row.ageGroup}</td>
+                        <td style={{ padding: 10 }}>{row.count}</td>
+                        <td style={{ padding: 10 }}>{row.avgTotal}</td>
+                        <td style={{ padding: 10 }}>{row.riskRate}%</td>
+                        <td style={{ padding: 10 }}>{row.topWeak}</td>
+                      </tr>
+                    ))}
+                    {!ageGroupStats.length && <tr><td colSpan={5} style={{ padding: 10, color: "#999" }}>연령대 데이터가 없습니다.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
+
             <SectionCard title="부서별 비교">
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -1610,13 +1705,14 @@ export default function App() {
 
               <div style={{ display: "grid", gap: 8 }}>
                 {paginatedResults.map((r) => (
-                  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: 10, alignItems: "center", background: selectedDeleteIds.includes(r.id) ? "#FAEEDA" : "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
+                  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto auto", gap: 10, alignItems: "center", background: selectedDeleteIds.includes(r.id) ? "#FAEEDA" : "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
                     <input type="checkbox" checked={selectedDeleteIds.includes(r.id)} onChange={() => toggleDeleteSelection(r.id)} aria-label={`${r.name} 결과 선택`} style={{ width: 18, height: 18 }} />
                     <div>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: 13 }}>{r.name} · {r.dept}</p>
-                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.total}점 · {r.riskLevel}{isAnonymousResult(r) ? " · 익명/이름 미입력" : ""}</p>
+                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.ageGroup || "응답하지 않음"} · {r.total}점 · {r.riskLevel}{isAnonymousResult(r) ? " · 익명/이름 미입력" : ""}</p>
                     </div>
                     <button onClick={() => { setSelectedId(r.id); setMode("report"); }} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>보기</button>
+                    <button onClick={() => startEditResult(r)} style={{ border: "0.5px solid #1D9E75", color: "#085041", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>수정</button>
                     <button onClick={() => deleteResult(r.id)} style={{ border: "0.5px solid #F09595", color: "#791F1F", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>삭제</button>
                   </div>
                 ))}
