@@ -909,6 +909,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [resetVersion, setResetVersion] = useState(0);
   const [cloudStatus, setCloudStatus] = useState<"local" | "connecting" | "connected" | "error">(db ? "connecting" : "local");
+  const [selectedDeleteIds, setSelectedDeleteIds] = useState<string[]>([]);
 
   useEffect(() => {
     const tag = document.createElement("style");
@@ -1004,6 +1005,7 @@ export default function App() {
         setResults((prev) => prev.filter((r) => r.id !== id));
       }
       if (selectedId === id) setSelectedId("");
+      setSelectedDeleteIds((prev) => prev.filter((itemId) => itemId !== id));
     } catch (error) {
       console.error(error);
       alert("삭제 중 오류가 발생했습니다.");
@@ -1208,11 +1210,47 @@ export default function App() {
       } else {
         setResults((prev) => prev.filter((row) => !isAnonymousResult(row)));
       }
+      setSelectedDeleteIds((prev) => prev.filter((id) => !anonymousRows.some((row) => row.id === id)));
       if (selectedResult && isAnonymousResult(selectedResult)) setSelectedId("");
       alert(`${anonymousRows.length}건의 익명 데이터를 삭제했습니다.`);
     } catch (error) {
       console.error(error);
       alert("익명 데이터 삭제 중 오류가 발생했습니다.");
+    }
+  };
+
+  const toggleDeleteSelection = (id: string) => {
+    setSelectedDeleteIds((prev) => prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]);
+  };
+
+  const selectVisibleResults = () => {
+    setSelectedDeleteIds(results.slice(0, 30).map((row) => row.id));
+  };
+
+  const clearDeleteSelection = () => {
+    setSelectedDeleteIds([]);
+  };
+
+  const deleteSelectedResults = async () => {
+    const validIds = selectedDeleteIds.filter((id) => results.some((row) => row.id === id));
+    if (!validIds.length) {
+      alert("선택된 데이터가 없습니다.");
+      return;
+    }
+    if (!confirm(`선택한 데이터 ${validIds.length}건을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+
+    try {
+      if (db) {
+        await Promise.all(validIds.map((id) => deleteResultFromCloud(id)));
+      } else {
+        setResults((prev) => prev.filter((row) => !validIds.includes(row.id)));
+      }
+      if (selectedResult && validIds.includes(selectedResult.id)) setSelectedId("");
+      setSelectedDeleteIds([]);
+      alert(`${validIds.length}건을 삭제했습니다.`);
+    } catch (error) {
+      console.error(error);
+      alert("선택 데이터 삭제 중 오류가 발생했습니다.");
     }
   };
 
@@ -1514,6 +1552,7 @@ export default function App() {
                   Excel 가져오기
                   <input type="file" accept=".xlsx,.xls" onChange={(e) => importExcel(e.target.files?.[0] || null)} style={{ display: "none" }} />
                 </label>
+                <button onClick={deleteSelectedResults} style={{ ...btnBase, background: selectedDeleteIds.length ? "#FAEEDA" : "#fff", border: "0.5px solid #EF9F27", color: "#633806" }}>선택 데이터 삭제 {selectedDeleteIds.length ? `(${selectedDeleteIds.length})` : ""}</button>
                 <button onClick={deleteAnonymousResults} style={{ ...btnBase, background: "#fff", border: "0.5px solid #EF9F27", color: "#633806" }}>익명 데이터 삭제</button>
                 <button onClick={clearAllStored} style={{ ...btnBase, background: "#fff", border: "0.5px solid #F09595", color: "#791F1F" }}>저장 데이터 전체 삭제</button>
               </div>
@@ -1536,10 +1575,16 @@ export default function App() {
               </div>
             </SectionCard>
 
-            <SectionCard title="저장된 결과 목록" right={<span style={{ fontSize: 12, color: "#999" }}>익명/이름 미입력 {results.filter(isAnonymousResult).length}건</span>}>
+            <SectionCard title="저장된 결과 목록" right={<span style={{ fontSize: 12, color: "#999" }}>익명/이름 미입력 {results.filter(isAnonymousResult).length}건 · 선택 {selectedDeleteIds.length}건</span>}>
+              <div className="no-print" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                <button onClick={selectVisibleResults} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 12, cursor: "pointer" }}>화면 목록 전체 선택</button>
+                <button onClick={clearDeleteSelection} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", fontSize: 12, cursor: "pointer" }}>선택 해제</button>
+                <button onClick={deleteSelectedResults} style={{ border: "0.5px solid #EF9F27", background: selectedDeleteIds.length ? "#FAEEDA" : "#fff", color: "#633806", borderRadius: 8, padding: "7px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>선택 삭제</button>
+              </div>
               <div style={{ display: "grid", gap: 8 }}>
                 {results.slice(0, 30).map((r) => (
-                  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, alignItems: "center", background: "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
+                  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: 10, alignItems: "center", background: selectedDeleteIds.includes(r.id) ? "#FAEEDA" : "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
+                    <input type="checkbox" checked={selectedDeleteIds.includes(r.id)} onChange={() => toggleDeleteSelection(r.id)} aria-label={`${r.name} 결과 선택`} style={{ width: 18, height: 18 }} />
                     <div>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: 13 }}>{r.name} · {r.dept}</p>
                       <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.total}점 · {r.riskLevel}{isAnonymousResult(r) ? " · 익명/이름 미입력" : ""}</p>
