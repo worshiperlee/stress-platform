@@ -1,22 +1,30 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import { initializeApp } from "firebase/app";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  getFirestore,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+  writeBatch,
+} from "firebase/firestore";
 
 // =========================================================
-// 스트레스 취약성 검사 고도화 버전
+// 스트레스 취약성 검사 시스템
 // - 48문항 전체 적용
-// - 영역별 점수 / 취약·보통·건강 판정
 // - 원문 문항 유지 / 직접 점수 합산
-// - 개인 결과 리포트
-// - 조직/부서 분석 대시보드
-// - 위험군 탐지
-// - 기간별 변화 분석
-// - AI형 자동 해석/개선 제안
-// - Excel 다중 시트 다운로드
-// - 인쇄/PDF 저장
-// - Firebase 연동을 위한 데이터 모델/어댑터 구조 포함
+// - 8개 하위영역 + 4대 관리영역 분석
+// - 개인 리포트 / 관리자 대시보드
+// - 위험군 탐지 / 기간별 변화 / 재검사 비교
+// - Excel 다운로드 / PDF 인쇄
+// - Firebase Firestore 클라우드 저장 지원
 // =========================================================
 
-// 인쇄 시 결과지만 나오도록 스타일 주입
 const printStyle = `
 button, input, select {
   -webkit-tap-highlight-color: transparent;
@@ -52,8 +60,10 @@ type AnswerValue = 0 | 1 | 3;
 type CatKey = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H";
 type BigCatKey = "physical" | "emotional" | "workLife" | "selfInsight";
 type Level = "취약" | "보통" | "건강";
-type AppMode = "test" | "dashboard" | "report" | "settings";
+type AppMode = "test" | "report" | "dashboard" | "settings";
 type PeriodPreset = "all" | "30d" | "90d" | "180d" | "365d";
+
+type RiskLevel = "낮음" | "주의" | "위험";
 
 interface Question {
   id: number;
@@ -65,13 +75,14 @@ interface SavedResult {
   id: string;
   name: string;
   dept: string;
+  testDate: string;
   total: number;
   status: string;
   scores: Record<CatKey, number>;
   levels: Record<CatKey, Level>;
   answers: Record<number, AnswerValue>;
   weakCats: CatKey[];
-  riskLevel: "낮음" | "주의" | "위험";
+  riskLevel: RiskLevel;
   date: string;
   createdAt: string;
   consent: boolean;
@@ -85,6 +96,32 @@ interface DeptStat {
   weakAvgCount: number;
   catAvg: Record<CatKey, number>;
 }
+
+// ─── Firebase ────────────────────────────────────────────
+const storageKey = "stressResults.v2";
+const RESULTS_COLLECTION = "stressResults";
+const MIN_DEPT_SAMPLE = 5;
+
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+};
+
+const isFirebaseConfigured = Boolean(
+  firebaseConfig.apiKey &&
+  firebaseConfig.authDomain &&
+  firebaseConfig.projectId &&
+  firebaseConfig.storageBucket &&
+  firebaseConfig.messagingSenderId &&
+  firebaseConfig.appId
+);
+
+const firebaseApp = isFirebaseConfigured ? initializeApp(firebaseConfig) : null;
+const db = firebaseApp ? getFirestore(firebaseApp) : null;
 
 // ─── Data ────────────────────────────────────────────────
 const CAT_KEYS: CatKey[] = ["A", "B", "C", "D", "E", "F", "G", "H"];
@@ -197,20 +234,33 @@ const QUESTIONS: Question[] = [
 ];
 
 // ─── Helpers ─────────────────────────────────────────────
-const storageKey = "stressResults.v2";
-const MIN_DEPT_SAMPLE = 5;
-
 function uid() {
   return `sr_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function todayDateInputValue() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function formatDate(date = new Date()) {
   return date.toLocaleDateString("ko-KR");
 }
 
+function formatDateInputForDisplay(value: string) {
+  if (!value) return formatDate();
+  const [year, month, day] = value.split("-");
+  if (!year || !month || !day) return formatDate();
+  return `${Number(year)}. ${Number(month)}. ${Number(day)}.`;
+}
+
 function normalizeDateKey(iso: string) {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function getResultDateKey(result: SavedResult) {
+  return result.testDate || normalizeDateKey(result.createdAt);
 }
 
 function getLevel(score: number): Level {
@@ -225,30 +275,6 @@ function getLevelStyle(level: Level) {
   return { bg: "#E1F5EE", border: "#5DCAA5", text: "#085041" };
 }
 
-function getBigCategoryStat(bigCat: BigCatKey, scores: Record<CatKey, number>) {
-  const children = BIG_CAT_CHILDREN[bigCat];
-  const total = children.reduce((sum, cat) => sum + scores[cat], 0);
-  const max = children.length * 18;
-  const avg = total / children.length;
-  const level = getLevel(avg);
-  const weakCount = children.filter((cat) => getLevel(scores[cat]) === "취약").length;
-  return {
-    bigCat,
-    label: BIG_CAT_NAMES[bigCat],
-    children,
-    total,
-    max,
-    avg: round1(avg),
-    level,
-    weakCount,
-  };
-}
-
-function getBigCategoryStats(scores: Record<CatKey, number>) {
-  return BIG_CAT_KEYS.map((bigCat) => getBigCategoryStat(bigCat, scores));
-}
-
-
 function getTotalStatus(total: number) {
   if (total >= 112) return { label: "매우 건강", bg: "#E1F5EE", color: "#085041" };
   if (total >= 96) return { label: "양호", bg: "#E1F5EE", color: "#085041" };
@@ -256,40 +282,13 @@ function getTotalStatus(total: number) {
   return { label: "취약", bg: "#FCEBEB", color: "#791F1F" };
 }
 
-function hasRepeatedWeak(scores?: Record<CatKey, number>, previous?: SavedResult | null) {
-  if (!scores || !previous) return false;
-  return CAT_KEYS.some((cat) => getLevel(scores[cat]) === "취약" && previous.levels[cat] === "취약");
+function round1(n: number) {
+  return Math.round(n * 10) / 10;
 }
 
-function getRiskLevel(
-  weakCount: number,
-  total: number,
-  scores?: Record<CatKey, number>,
-  previous?: SavedResult | null
-): SavedResult["riskLevel"] {
-  const workLifeWeak = scores ? getLevel(scores.G) === "취약" : false;
-  const restWeak = scores ? getLevel(scores.F) === "취약" : false;
-  const previousDrop = previous ? previous.total - total : 0;
-
-  if (
-    weakCount >= 3 ||
-    total < 64 ||
-    ((workLifeWeak || restWeak) && total < 96) ||
-    previousDrop >= 15
-  ) return "위험";
-
-  if (
-    weakCount >= 1 ||
-    total < 96 ||
-    previousDrop >= 8 ||
-    hasRepeatedWeak(scores, previous)
-  ) return "주의";
-
-  return "낮음";
-}
-
-function scoreAnswer(val: AnswerValue): number {
-  return val;
+function average(nums: number[]) {
+  if (!nums.length) return 0;
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
 }
 
 function emptyScores(): Record<CatKey, number> {
@@ -303,7 +302,7 @@ function calcScores(answers: Record<number, AnswerValue>) {
   const scores = emptyScores();
   QUESTIONS.forEach((q) => {
     const val = answers[q.id];
-    if (val !== undefined) scores[q.cat] += scoreAnswer(val);
+    if (val !== undefined) scores[q.cat] += val;
   });
   return scores;
 }
@@ -315,13 +314,46 @@ function calcLevels(scores: Record<CatKey, number>) {
   }, {} as Record<CatKey, Level>);
 }
 
-function average(nums: number[]) {
-  if (!nums.length) return 0;
-  return nums.reduce((a, b) => a + b, 0) / nums.length;
+function getBigCategoryStat(bigCat: BigCatKey, scores: Record<CatKey, number>) {
+  const children = BIG_CAT_CHILDREN[bigCat];
+  const total = children.reduce((sum, cat) => sum + scores[cat], 0);
+  const max = children.length * 18;
+  const avg = total / children.length;
+  const level = getLevel(avg);
+  return {
+    bigCat,
+    label: BIG_CAT_NAMES[bigCat],
+    children,
+    total,
+    max,
+    avg: round1(avg),
+    level,
+    weakCount: children.filter((cat) => getLevel(scores[cat]) === "취약").length,
+  };
 }
 
-function round1(n: number) {
-  return Math.round(n * 10) / 10;
+function getBigCategoryStats(scores: Record<CatKey, number>) {
+  return BIG_CAT_KEYS.map((bigCat) => getBigCategoryStat(bigCat, scores));
+}
+
+function hasRepeatedWeak(scores?: Record<CatKey, number>, previous?: SavedResult | null) {
+  if (!scores || !previous) return false;
+  return CAT_KEYS.some((cat) => getLevel(scores[cat]) === "취약" && previous.levels[cat] === "취약");
+}
+
+function getRiskLevel(
+  weakCount: number,
+  total: number,
+  scores?: Record<CatKey, number>,
+  previous?: SavedResult | null
+): RiskLevel {
+  const workLifeWeak = scores ? getLevel(scores.G) === "취약" : false;
+  const restWeak = scores ? getLevel(scores.F) === "취약" : false;
+  const previousDrop = previous ? previous.total - total : 0;
+
+  if (weakCount >= 3 || total < 64 || ((workLifeWeak || restWeak) && total < 96) || previousDrop >= 15) return "위험";
+  if (weakCount >= 1 || total < 96 || previousDrop >= 8 || hasRepeatedWeak(scores, previous)) return "주의";
+  return "낮음";
 }
 
 function loadResults(): SavedResult[] {
@@ -338,41 +370,37 @@ function saveResults(results: SavedResult[]) {
   localStorage.setItem(storageKey, JSON.stringify(results));
 }
 
+async function saveResultToCloud(result: SavedResult) {
+  if (!db) return;
+  await setDoc(doc(db, RESULTS_COLLECTION, result.id), result);
+}
+
+async function saveManyResultsToCloud(results: SavedResult[]) {
+  if (!db || results.length === 0) return;
+  const batch = writeBatch(db);
+  results.forEach((result) => batch.set(doc(db, RESULTS_COLLECTION, result.id), result));
+  await batch.commit();
+}
+
+async function deleteResultFromCloud(id: string) {
+  if (!db) return;
+  await deleteDoc(doc(db, RESULTS_COLLECTION, id));
+}
+
+async function clearCloudResults() {
+  if (!db) return;
+  const snapshot = await getDocs(collection(db, RESULTS_COLLECTION));
+  const batch = writeBatch(db);
+  snapshot.docs.forEach((item) => batch.delete(item.ref));
+  await batch.commit();
+}
+
 function filterByPeriod(results: SavedResult[], preset: PeriodPreset) {
   if (preset === "all") return results;
   const days = Number(preset.replace("d", ""));
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
-  return results.filter((r) => new Date(r.createdAt) >= cutoff);
-}
-
-function makeResult(params: {
-  name: string;
-  dept: string;
-  answers: Record<number, AnswerValue>;
-  consent: boolean;
-  previousResult?: SavedResult | null;
-}): SavedResult {
-  const scores = calcScores(params.answers);
-  const levels = calcLevels(scores);
-  const weakCats = CAT_KEYS.filter((cat) => levels[cat] === "취약");
-  const total = Object.values(scores).reduce((a, b) => a + b, 0);
-  const totalStatus = getTotalStatus(total);
-  return {
-    id: uid(),
-    name: params.name.trim() || "이름 미입력",
-    dept: params.dept.trim() || "부서 미입력",
-    total,
-    status: totalStatus.label,
-    scores,
-    levels,
-    answers: params.answers,
-    weakCats,
-    riskLevel: getRiskLevel(weakCats.length, total, scores, params.previousResult || null),
-    date: formatDate(),
-    createdAt: new Date().toISOString(),
-    consent: params.consent,
-  };
+  return results.filter((r) => new Date(getResultDateKey(r)) >= cutoff);
 }
 
 function findPreviousResult(results: SavedResult[], name: string, dept: string) {
@@ -390,73 +418,43 @@ function findPreviousComparableResult(results: SavedResult[], current: SavedResu
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] || null;
 }
 
+function makeResult(params: {
+  name: string;
+  dept: string;
+  testDate: string;
+  answers: Record<number, AnswerValue>;
+  consent: boolean;
+  previousResult?: SavedResult | null;
+}): SavedResult {
+  const scores = calcScores(params.answers);
+  const levels = calcLevels(scores);
+  const weakCats = CAT_KEYS.filter((cat) => levels[cat] === "취약");
+  const total = Object.values(scores).reduce((a, b) => a + b, 0);
+  const totalStatus = getTotalStatus(total);
+
+  return {
+    id: uid(),
+    name: params.name.trim() || "이름 미입력",
+    dept: params.dept.trim() || "부서 미입력",
+    testDate: params.testDate || todayDateInputValue(),
+    total,
+    status: totalStatus.label,
+    scores,
+    levels,
+    answers: params.answers,
+    weakCats,
+    riskLevel: getRiskLevel(weakCats.length, total, scores, params.previousResult || null),
+    date: formatDateInputForDisplay(params.testDate || todayDateInputValue()),
+    createdAt: new Date().toISOString(),
+    consent: params.consent,
+  };
+}
+
 function displayNameForAdmin(result: SavedResult) {
   if (!result.consent) return "익명";
   if (!result.name || result.name === "이름 미입력") return "이름 미입력";
   if (result.name.length <= 2) return `${result.name[0]}*`;
   return `${result.name[0]}${"*".repeat(result.name.length - 2)}${result.name[result.name.length - 1]}`;
-}
-
-function getPatternInsights(result: SavedResult) {
-  const isWeak = (cat: CatKey) => result.levels[cat] === "취약";
-  const patterns: { title: string; body: string; recommendation: string }[] = [];
-
-  if (isWeak("G") && isWeak("F")) {
-    patterns.push({
-      title: "과로·회복 부족 패턴",
-      body: "일·삶균형과 여가·휴식이 함께 낮아 업무 경계와 회복 시간이 동시에 약화되어 있을 가능성이 있습니다.",
-      recommendation: "퇴근 후 업무 연결을 줄이고, 주 1회 이상 회복 시간을 일정에 먼저 배치하세요.",
-    });
-  }
-  if (isWeak("D") && isWeak("H")) {
-    patterns.push({
-      title: "정서적 지지 자원 부족 패턴",
-      body: "사회적관계와 자기이해가 함께 낮아 스트레스 상황에서 혼자 버티는 양상이 나타날 수 있습니다.",
-      recommendation: "신뢰할 수 있는 동료·친구와의 대화 루틴을 만들고 필요 시 상담 자원을 연결하세요.",
-    });
-  }
-  if (isWeak("A") && isWeak("B") && isWeak("C")) {
-    patterns.push({
-      title: "신체 건강 루틴 취약 패턴",
-      body: "식습관, 음주·흡연, 운동 영역이 함께 낮아 스트레스가 신체 컨디션 관리로 이어지지 못할 수 있습니다.",
-      recommendation: "식사·수분·걷기처럼 부담이 작은 행동부터 2주간 고정 루틴으로 만드세요.",
-    });
-  }
-  if (isWeak("G") && isWeak("D")) {
-    patterns.push({
-      title: "업무 부담 고립 패턴",
-      body: "업무와 삶의 경계가 약하고 지지 관계도 낮아 업무 스트레스를 혼자 떠안을 가능성이 있습니다.",
-      recommendation: "업무량 조정 대화, 동료 지원 체계, 관리자 면담을 병행하세요.",
-    });
-  }
-  if (isWeak("F") && isWeak("H")) {
-    patterns.push({
-      title: "내적 회복감 저하 패턴",
-      body: "휴식과 자기이해가 함께 낮아 쉬어도 회복감을 느끼기 어려울 수 있습니다.",
-      recommendation: "짧은 명상, 저널링, 수면 루틴처럼 자극을 낮추는 회복 전략을 우선 적용하세요.",
-    });
-  }
-
-  return patterns;
-}
-
-function getTwoWeekActionPlan(result: SavedResult) {
-  const lowest = CAT_KEYS.map((cat) => ({ cat, score: result.scores[cat] })).sort((a, b) => a.score - b.score)[0];
-  const programs = CAT_PROGRAMS[lowest.cat];
-  return [
-    {
-      label: "1주차",
-      body: `${CAT_NAMES[lowest.cat]} 영역을 중심으로 '${programs[0]}'를 작게 시작합니다. 매일 5~10분 안에 끝나는 행동으로 설정하세요.`,
-    },
-    {
-      label: "2주차",
-      body: `'${programs[1] || programs[0]}'를 추가하고, 실천 여부를 주 3회 이상 체크합니다. 실패한 날은 원인을 기록하고 강도를 낮추세요.`,
-    },
-    {
-      label: "체크 항목",
-      body: `실천 횟수, 피로감, 수면·휴식감, 업무 경계 유지 여부를 간단히 기록한 뒤 2~4주 후 재검사를 권장합니다.`,
-    },
-  ];
 }
 
 function buildDeptStats(results: SavedResult[]): DeptStat[] {
@@ -465,6 +463,7 @@ function buildDeptStats(results: SavedResult[]): DeptStat[] {
     const key = r.dept || "부서 미입력";
     map.set(key, [...(map.get(key) || []), r]);
   });
+
   return [...map.entries()]
     .map(([dept, rows]) => {
       const catAvg = emptyScores();
@@ -487,7 +486,7 @@ function buildDeptStats(results: SavedResult[]): DeptStat[] {
 function buildTrend(results: SavedResult[]) {
   const map = new Map<string, SavedResult[]>();
   results.forEach((r) => {
-    const key = normalizeDateKey(r.createdAt);
+    const key = getResultDateKey(r);
     map.set(key, [...(map.get(key) || []), r]);
   });
   return [...map.entries()]
@@ -515,6 +514,68 @@ function getWeakCategoryRanking(results: SavedResult[]) {
   }, {} as Record<CatKey, number>);
   results.forEach((r) => r.weakCats.forEach((cat) => counts[cat]++));
   return CAT_KEYS.map((cat) => ({ cat, count: counts[cat] })).sort((a, b) => b.count - a.count);
+}
+
+function getPatternInsights(result: SavedResult) {
+  const isWeak = (cat: CatKey) => result.levels[cat] === "취약";
+  const patterns: { title: string; body: string; recommendation: string }[] = [];
+
+  if (isWeak("G") && isWeak("F")) {
+    patterns.push({
+      title: "과로·회복 부족 패턴",
+      body: "일과 가정의 균형과 여가가 함께 낮아 업무 경계와 회복 시간이 동시에 약화되어 있을 가능성이 있습니다.",
+      recommendation: "퇴근 후 업무 연결을 줄이고, 주 1회 이상 회복 시간을 일정에 먼저 배치하세요.",
+    });
+  }
+  if (isWeak("D") && isWeak("H")) {
+    patterns.push({
+      title: "정서적 지지 자원 부족 패턴",
+      body: "사회적관계와 자기이해가 함께 낮아 스트레스 상황에서 혼자 버티는 양상이 나타날 수 있습니다.",
+      recommendation: "신뢰할 수 있는 동료·친구와의 대화 루틴을 만들고 필요 시 상담 자원을 연결하세요.",
+    });
+  }
+  if (isWeak("A") && isWeak("B") && isWeak("C")) {
+    patterns.push({
+      title: "신체 건강 루틴 취약 패턴",
+      body: "식습관, 금연·금주, 운동 영역이 함께 낮아 스트레스가 신체 컨디션 관리로 이어지지 못할 수 있습니다.",
+      recommendation: "식사·수분·걷기처럼 부담이 작은 행동부터 2주간 고정 루틴으로 만드세요.",
+    });
+  }
+  if (isWeak("G") && isWeak("D")) {
+    patterns.push({
+      title: "업무 부담 고립 패턴",
+      body: "일과 가정의 균형이 낮고 지지 관계도 낮아 업무 스트레스를 혼자 떠안을 가능성이 있습니다.",
+      recommendation: "업무량 조정 대화, 동료 지원 체계, 관리자 면담을 병행하세요.",
+    });
+  }
+  if (isWeak("F") && isWeak("H")) {
+    patterns.push({
+      title: "내적 회복감 저하 패턴",
+      body: "여가와 자기이해가 함께 낮아 쉬어도 회복감을 느끼기 어려울 수 있습니다.",
+      recommendation: "짧은 명상, 저널링, 수면 루틴처럼 자극을 낮추는 회복 전략을 우선 적용하세요.",
+    });
+  }
+
+  return patterns;
+}
+
+function getTwoWeekActionPlan(result: SavedResult) {
+  const lowest = CAT_KEYS.map((cat) => ({ cat, score: result.scores[cat] })).sort((a, b) => a.score - b.score)[0];
+  const programs = CAT_PROGRAMS[lowest.cat];
+  return [
+    {
+      label: "1주차",
+      body: `${CAT_NAMES[lowest.cat]} 영역을 중심으로 '${programs[0]}'를 작게 시작합니다. 매일 5~10분 안에 끝나는 행동으로 설정하세요.`,
+    },
+    {
+      label: "2주차",
+      body: `'${programs[1] || programs[0]}'를 추가하고, 실천 여부를 주 3회 이상 체크합니다. 실패한 날은 원인을 기록하고 강도를 낮추세요.`,
+    },
+    {
+      label: "체크 항목",
+      body: "실천 횟수, 피로감, 수면·휴식감, 업무 경계 유지 여부를 간단히 기록한 뒤 2~4주 후 재검사를 권장합니다.",
+    },
+  ];
 }
 
 function getOrgAiInsight(results: SavedResult[], deptStats: DeptStat[]) {
@@ -577,7 +638,7 @@ function getPersonalAiInsight(result: SavedResult | null) {
   }
 
   if (result.riskLevel === "위험") {
-    lines.push("현재 결과는 위험군 기준에 해당합니다. 취약 영역 수, 총점, 회복 부족 또는 이전 대비 하락 가능성을 함께 고려해 전문가 상담 또는 관리자와의 업무 조정 논의를 권장합니다.");
+    lines.push("현재 결과는 위험군 기준에 해당합니다. 전문가 상담 또는 관리자와의 업무 조정 논의를 권장합니다.");
   } else if (result.riskLevel === "주의") {
     lines.push("주의 신호가 있으므로 1개월 후 재검사를 통해 변화 추이를 확인하는 것이 좋습니다.");
   } else {
@@ -649,9 +710,7 @@ function QuestionCard({ question, answer, onAnswer }: { question: Question; answ
         <div style={{ minWidth: 30, height: 30, borderRadius: 10, background: isDone ? "#E1F5EE" : "#f5f5f5", color: isDone ? "#085041" : "#888", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
           {question.id}
         </div>
-        <div>
-          <p style={{ fontSize: 14, lineHeight: 1.55, margin: 0, paddingTop: 2 }}>{question.text}</p>
-        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.55, margin: 0, paddingTop: 2 }}>{question.text}</p>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 7 }}>
         {options.map((opt) => (
@@ -675,6 +734,7 @@ function CategoryCard({ cat, score }: { cat: CatKey; score: number }) {
   const lv = getLevel(score);
   const lc = getLevelStyle(lv);
   const pct = Math.min(100, Math.round((score / 18) * 100));
+
   return (
     <div style={{ background: "#fff", border: "0.5px solid #e0e0e0", borderRadius: 14, padding: "14px 16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8 }}>
@@ -714,11 +774,9 @@ function BigCategorySection({ bigCat, scores }: { bigCat: BigCatKey; scores: Rec
           <p style={{ fontSize: 11, color: "#999", margin: "5px 0 0" }}>하위영역 평균 {stat.avg}점</p>
         </div>
       </div>
-
       <div style={{ height: 6, background: "#f0f0f0", borderRadius: 999, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct}%`, background: style.border, borderRadius: 999 }} />
       </div>
-
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 10 }}>
         {stat.children.map((cat) => <CategoryCard key={cat} cat={cat} score={scores[cat]} />)}
       </div>
@@ -750,6 +808,7 @@ function BigCategoryCompactList({ scores }: { scores: Record<CatKey, number> }) 
 function AlertBox({ result }: { result: SavedResult | null }) {
   if (!result) return null;
   const weakNames = result.weakCats.map((c) => CAT_NAMES[c]);
+
   if (result.riskLevel === "위험") {
     return (
       <div style={{ background: "#FCEBEB", borderRadius: 14, padding: "16px 18px", display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 20 }}>
@@ -761,6 +820,7 @@ function AlertBox({ result }: { result: SavedResult | null }) {
       </div>
     );
   }
+
   if (result.riskLevel === "주의") {
     return (
       <div style={{ background: "#FAEEDA", borderRadius: 14, padding: "16px 18px", display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 20 }}>
@@ -772,6 +832,7 @@ function AlertBox({ result }: { result: SavedResult | null }) {
       </div>
     );
   }
+
   return (
     <div style={{ background: "#E1F5EE", borderRadius: 14, padding: "16px 18px", display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 20 }}>
       <span style={{ fontSize: 20, color: "#085041", flexShrink: 0 }}>✓</span>
@@ -834,38 +895,63 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>("test");
   const [name, setName] = useState("");
   const [dept, setDept] = useState("");
+  const [testDate, setTestDate] = useState(todayDateInputValue());
   const [consent, setConsent] = useState(true);
   const [answers, setAnswers] = useState<Record<number, AnswerValue>>({});
   const [results, setResults] = useState<SavedResult[]>([]);
-  const [selectedId, setSelectedId] = useState<string>("");
+  const [selectedId, setSelectedId] = useState("");
   const [period, setPeriod] = useState<PeriodPreset>("all");
   const [deptFilter, setDeptFilter] = useState("전체");
   const [search, setSearch] = useState("");
   const [resetVersion, setResetVersion] = useState(0);
+  const [cloudStatus, setCloudStatus] = useState<"local" | "connecting" | "connected" | "error">(db ? "connecting" : "local");
 
   useEffect(() => {
     const tag = document.createElement("style");
     tag.innerHTML = printStyle;
     document.head.appendChild(tag);
-    setResults(loadResults());
-    return () => { document.head.removeChild(tag); };
+
+    if (!db) {
+      setResults(loadResults());
+      setCloudStatus("local");
+      return () => { document.head.removeChild(tag); };
+    }
+
+    setCloudStatus("connecting");
+    const q = query(collection(db, RESULTS_COLLECTION), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const cloudResults = snapshot.docs.map((item) => item.data() as SavedResult);
+        setResults(cloudResults);
+        saveResults(cloudResults);
+        setCloudStatus("connected");
+      },
+      (error) => {
+        console.error("Firestore sync error", error);
+        setResults(loadResults());
+        setCloudStatus("error");
+      }
+    );
+
+    return () => {
+      unsubscribe();
+      document.head.removeChild(tag);
+    };
   }, []);
 
   useEffect(() => {
-    saveResults(results);
+    if (!db) saveResults(results);
   }, [results]);
 
   const answeredCount = Object.keys(answers).length;
-  const catScores = useMemo(() => calcScores(answers), [answers]);
-  const catLevels = useMemo(() => calcLevels(catScores), [catScores]);
-  const totalScore = Object.values(catScores).reduce((a, b) => a + b, 0);
-  const totalStatus = getTotalStatus(totalScore);
   const unansweredIds = useMemo(() => QUESTIONS.filter((q) => answers[q.id] === undefined).map((q) => q.id), [answers]);
   const firstUnansweredId = unansweredIds[0];
+
   const previewResult = useMemo(() => {
     if (!answeredCount) return null;
-    return makeResult({ name, dept, answers, consent, previousResult: findPreviousResult(results, name, dept) });
-  }, [name, dept, answers, consent, answeredCount, results]);
+    return makeResult({ name, dept, testDate, answers, consent, previousResult: findPreviousResult(results, name, dept) });
+  }, [name, dept, testDate, answers, consent, answeredCount, results]);
 
   const selectedResult = useMemo(() => results.find((r) => r.id === selectedId) || previewResult || results[0] || null, [results, selectedId, previewResult]);
   const selectedPreviousResult = useMemo(() => selectedResult ? findPreviousComparableResult(results, selectedResult) : null, [results, selectedResult]);
@@ -885,15 +971,15 @@ export default function App() {
   const weakRank = useMemo(() => getWeakCategoryRanking(filteredResults), [filteredResults]);
   const orgInsight = useMemo(() => getOrgAiInsight(filteredResults, deptStats), [filteredResults, deptStats]);
 
+  const btnBase: React.CSSProperties = { fontSize: 14, padding: "10px 18px", borderRadius: 10, cursor: "pointer", border: "none", fontWeight: 700, transition: "opacity 0.15s", touchAction: "manipulation" };
+
   const handleAnswer = (id: number, val: AnswerValue) => {
     setAnswers((prev) => ({ ...prev, [id]: val }));
     const nextId = id + 1;
     setTimeout(() => document.getElementById(`q-${nextId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
   };
 
-  const btnBase: React.CSSProperties = { fontSize: 14, padding: "10px 18px", borderRadius: 10, cursor: "pointer", border: "none", fontWeight: 700, transition: "opacity 0.15s", touchAction: "manipulation" };
-
-  const saveCurrent = () => {
+  const saveCurrent = async () => {
     if (answeredCount < QUESTIONS.length) {
       alert(`미응답 문항이 ${QUESTIONS.length - answeredCount}개 있습니다. 첫 미응답 문항으로 이동합니다.`);
       if (firstUnansweredId) {
@@ -901,11 +987,21 @@ export default function App() {
       }
       return;
     }
-    const result = makeResult({ name, dept, answers, consent, previousResult: findPreviousResult(results, name, dept) });
-    setResults((prev) => [result, ...prev]);
-    setSelectedId(result.id);
-    setMode("report");
-    alert("검사 결과가 저장되었습니다.");
+
+    const result = makeResult({ name, dept, testDate, answers, consent, previousResult: findPreviousResult(results, name, dept) });
+    try {
+      if (db) {
+        await saveResultToCloud(result);
+      } else {
+        setResults((prev) => [result, ...prev]);
+      }
+      setSelectedId(result.id);
+      setMode("report");
+      alert(db ? "검사 결과가 클라우드에 저장되었습니다." : "검사 결과가 이 기기에 저장되었습니다.");
+    } catch (error) {
+      console.error(error);
+      alert("저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.");
+    }
   };
 
   const resetAll = () => {
@@ -915,14 +1011,24 @@ export default function App() {
     setAnswers({});
     setName("");
     setDept("");
+    setTestDate(todayDateInputValue());
     setConsent(true);
     setResetVersion((v) => v + 1);
   };
 
-  const deleteResult = (id: string) => {
+  const deleteResult = async (id: string) => {
     if (!confirm("선택한 결과를 삭제할까요?")) return;
-    setResults((prev) => prev.filter((r) => r.id !== id));
-    if (selectedId === id) setSelectedId("");
+    try {
+      if (db) {
+        await deleteResultFromCloud(id);
+      } else {
+        setResults((prev) => prev.filter((r) => r.id !== id));
+      }
+      if (selectedId === id) setSelectedId("");
+    } catch (error) {
+      console.error(error);
+      alert("삭제 중 오류가 발생했습니다.");
+    }
   };
 
   const exportExcel = () => {
@@ -932,6 +1038,7 @@ export default function App() {
         이름: r.consent ? r.name : "익명",
         부서: r.dept,
         날짜: r.date,
+        검사일: r.testDate || getResultDateKey(r),
         생성시각: r.createdAt,
         총점: r.total,
         총점상태: r.status,
@@ -968,7 +1075,7 @@ export default function App() {
       return row;
     });
 
-    const trendRows = trend.map((t) => ({ 날짜: t.date, 건수: t.count, 평균총점: t.avgTotal, 주의위험비율: `${t.riskRate}%` }));
+    const trendRows = trend.map((t) => ({ 검사일: t.date, 건수: t.count, 평균총점: t.avgTotal, 주의위험비율: `${t.riskRate}%` }));
     const weakRows = weakRank.map((w) => ({ 영역: `${w.cat}.${CAT_NAMES[w.cat]}`, 취약건수: w.count }));
 
     const wb = XLSX.utils.book_new();
@@ -976,7 +1083,7 @@ export default function App() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(deptRows), "부서분석");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trendRows), "기간추이");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(weakRows), "취약영역랭킹");
-    XLSX.writeFile(wb, `스트레스취약성_조직리포트_${normalizeDateKey(new Date().toISOString())}.xlsx`);
+    XLSX.writeFile(wb, `스트레스취약성_조직리포트_${todayDateInputValue()}.xlsx`);
   };
 
   const exportSelectedExcel = () => {
@@ -986,16 +1093,23 @@ export default function App() {
       이름: r.consent ? r.name : "익명",
       부서: r.dept,
       날짜: r.date,
+      검사일: r.testDate || getResultDateKey(r),
       총점: r.total,
       총점상태: r.status,
       위험도: r.riskLevel,
       취약영역수: r.weakCats.length,
       취약영역: r.weakCats.map((c) => CAT_NAMES[c]).join(", "),
     };
+    getBigCategoryStats(r.scores).forEach((stat) => {
+      row[`${stat.label} 합계`] = stat.total;
+      row[`${stat.label} 평균`] = stat.avg;
+      row[`${stat.label} 판정`] = stat.level;
+    });
     CAT_KEYS.forEach((c) => {
       row[`${c}.${CAT_NAMES[c]} 점수`] = r.scores[c];
       row[`${c}.${CAT_NAMES[c]} 판정`] = r.levels[c];
     });
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([row]), "개인결과");
     XLSX.utils.book_append_sheet(
@@ -1003,7 +1117,7 @@ export default function App() {
       XLSX.utils.json_to_sheet(CAT_KEYS.map((c) => ({ 영역: `${c}.${CAT_NAMES[c]}`, 점수: r.scores[c], 판정: r.levels[c], 개선방향: CAT_ADVICE[c] }))),
       "영역해석"
     );
-    XLSX.writeFile(wb, `스트레스검사_${r.name || "결과"}_${normalizeDateKey(r.createdAt)}.xlsx`);
+    XLSX.writeFile(wb, `스트레스검사_${r.name || "결과"}_${r.testDate || todayDateInputValue()}.xlsx`);
   };
 
   const importExcel = async (file: File | null) => {
@@ -1012,16 +1126,19 @@ export default function App() {
     const wb = XLSX.read(buffer);
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json<Record<string, any>>(sheet);
+
     const imported: SavedResult[] = json.map((row) => {
       const scores = emptyScores();
       CAT_KEYS.forEach((c) => { scores[c] = Number(row[`${c}.${CAT_NAMES[c]} 점수`] ?? row[`${c}.${CAT_NAMES[c]}`] ?? 0); });
       const levels = calcLevels(scores);
       const weakCats = CAT_KEYS.filter((c) => levels[c] === "취약");
       const total = Number(row["총점"] ?? Object.values(scores).reduce((a, b) => a + b, 0));
+      const testDateValue = String(row["검사일"] || row["testDate"] || todayDateInputValue());
       return {
         id: String(row.ID || uid()),
         name: String(row["이름"] || "이름 미입력"),
         dept: String(row["부서"] || "부서 미입력"),
+        testDate: testDateValue,
         total,
         status: String(row["총점상태"] || getTotalStatus(total).label),
         scores,
@@ -1029,16 +1146,26 @@ export default function App() {
         answers: {},
         weakCats,
         riskLevel: getRiskLevel(weakCats.length, total, scores),
-        date: String(row["날짜"] || formatDate()),
+        date: String(row["날짜"] || formatDateInputForDisplay(testDateValue)),
         createdAt: String(row["생성시각"] || new Date().toISOString()),
         consent: true,
       };
     });
-    setResults((prev) => [...imported, ...prev]);
-    alert(`${imported.length}건을 가져왔습니다.`);
+
+    try {
+      if (db) {
+        await saveManyResultsToCloud(imported);
+      } else {
+        setResults((prev) => [...imported, ...prev]);
+      }
+      alert(`${imported.length}건을 가져왔습니다.`);
+    } catch (error) {
+      console.error(error);
+      alert("가져오기 중 오류가 발생했습니다.");
+    }
   };
 
-  const seedDemoData = () => {
+  const seedDemoData = async () => {
     const depts = ["인사팀", "영업팀", "개발팀", "고객지원팀", "마케팅팀"];
     const demo = Array.from({ length: 36 }, (_, i) => {
       const answersObj: Record<number, AnswerValue> = {};
@@ -1047,20 +1174,40 @@ export default function App() {
         const r = Math.random();
         answersObj[q.id] = r < bias ? 3 : r < bias + 0.2 ? 1 : 0;
       });
-      const result = makeResult({ name: `데모${i + 1}`, dept: depts[i % depts.length], answers: answersObj, consent: false });
       const d = new Date();
       d.setDate(d.getDate() - Math.floor(Math.random() * 150));
+      const demoDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const result = makeResult({ name: `데모${i + 1}`, dept: depts[i % depts.length], testDate: demoDate, answers: answersObj, consent: false });
       result.createdAt = d.toISOString();
-      result.date = formatDate(d);
+      result.date = formatDateInputForDisplay(demoDate);
       return result;
     });
-    setResults((prev) => [...demo, ...prev]);
+
+    try {
+      if (db) {
+        await saveManyResultsToCloud(demo);
+      } else {
+        setResults((prev) => [...demo, ...prev]);
+      }
+    } catch (error) {
+      console.error(error);
+      alert("데모 데이터 생성 중 오류가 발생했습니다.");
+    }
   };
 
-  const clearAllStored = () => {
+  const clearAllStored = async () => {
     if (!confirm("저장된 모든 결과를 삭제할까요? 이 작업은 되돌릴 수 없습니다.")) return;
-    setResults([]);
-    setSelectedId("");
+    try {
+      if (db) {
+        await clearCloudResults();
+      } else {
+        setResults([]);
+      }
+      setSelectedId("");
+    } catch (error) {
+      console.error(error);
+      alert("전체 삭제 중 오류가 발생했습니다.");
+    }
   };
 
   return (
@@ -1072,7 +1219,7 @@ export default function App() {
               <div style={{ width: 44, height: 44, borderRadius: 14, background: "#E1F5EE", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>🧠</div>
               <div>
                 <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>스트레스 취약성 검사 시스템</h1>
-                <p style={{ fontSize: 13, color: "#888", margin: "5px 0 0", lineHeight: 1.5 }}>48문항 · 8개 영역 · 개인 리포트 · 조직 분석 · AI 개선 제안</p>
+                <p style={{ fontSize: 13, color: "#888", margin: "5px 0 0", lineHeight: 1.5 }}>48문항 · 4대 관리영역 · 개인 리포트 · 조직 분석 · 클라우드 저장</p>
               </div>
             </div>
           </div>
@@ -1081,6 +1228,17 @@ export default function App() {
             <NavButton active={mode === "report"} onClick={() => setMode("report")}>개인 리포트</NavButton>
             <NavButton active={mode === "dashboard"} onClick={() => setMode("dashboard")}>관리자 대시보드</NavButton>
             <NavButton active={mode === "settings"} onClick={() => setMode("settings")}>설정/클라우드</NavButton>
+            <span style={{
+              borderRadius: 999,
+              padding: "9px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              background: cloudStatus === "connected" ? "#E1F5EE" : cloudStatus === "error" ? "#FCEBEB" : cloudStatus === "connecting" ? "#FAEEDA" : "#f1f1f1",
+              color: cloudStatus === "connected" ? "#085041" : cloudStatus === "error" ? "#791F1F" : cloudStatus === "connecting" ? "#633806" : "#666",
+              alignSelf: "center",
+            }}>
+              {cloudStatus === "connected" ? "☁️ 클라우드 연결" : cloudStatus === "connecting" ? "☁️ 연결 중" : cloudStatus === "error" ? "⚠️ 클라우드 오류" : "💻 로컬 저장"}
+            </span>
           </nav>
         </header>
 
@@ -1096,10 +1254,14 @@ export default function App() {
                   <span style={{ fontSize: 12, color: "#888", fontWeight: 650 }}>부서</span>
                   <input value={dept} onChange={(e) => setDept(e.target.value)} placeholder="인사팀" style={{ padding: "11px 13px", fontSize: 15, border: "0.5px solid #ddd", borderRadius: 10, outline: "none", background: "#fff" }} />
                 </label>
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ fontSize: 12, color: "#888", fontWeight: 650 }}>검사일</span>
+                  <input type="date" value={testDate} onChange={(e) => setTestDate(e.target.value)} style={{ padding: "10px 13px", fontSize: 15, border: "0.5px solid #ddd", borderRadius: 10, outline: "none", background: "#fff" }} />
+                </label>
               </div>
               <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "#777", lineHeight: 1.5 }}>
                 <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} style={{ marginTop: 2 }} />
-                개인정보를 결과 저장 및 조직 통계에 활용하는 것에 동의합니다. 미동의 시 리포트에는 익명 처리할 수 있습니다.
+                개인정보를 결과 저장 및 조직 통계에 활용하는 것에 동의합니다. 미동의 시 관리자 화면에서는 익명 처리됩니다.
               </label>
             </SectionCard>
 
@@ -1131,7 +1293,7 @@ export default function App() {
         {mode === "report" && (
           <main id="print-area" style={{ maxWidth: 980, margin: "0 auto" }}>
             <div className="no-print" style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
-              <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)} style={{ padding: "10px 12px", borderRadius: 10, border: "0.5px solid #ddd", minWidth: 240 }}>
+              <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)} style={{ padding: "10px 12px", borderRadius: 10, border: "0.5px solid #ddd", minWidth: 260 }}>
                 <option value="">현재 입력값 또는 최신 결과</option>
                 {results.map((r) => <option key={r.id} value={r.id}>{r.date} · {r.name} · {r.dept} · {r.total}점</option>)}
               </select>
@@ -1150,7 +1312,7 @@ export default function App() {
                     <div>
                       <p style={{ fontSize: 11, color: "#999", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 5px" }}>개인 검사 결과</p>
                       <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>스트레스 취약성 프로파일</h2>
-                      <p style={{ fontSize: 13, color: "#888", margin: "8px 0 0" }}>{selectedResult.consent ? selectedResult.name : "익명"} · {selectedResult.dept} · {selectedResult.date}</p>
+                      <p style={{ fontSize: 13, color: "#888", margin: "8px 0 0" }}>{selectedResult.consent ? selectedResult.name : "익명"} · {selectedResult.dept} · 검사일 {selectedResult.date}</p>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <p style={{ fontSize: 12, color: "#888", margin: "0 0 4px" }}>총점</p>
@@ -1166,9 +1328,7 @@ export default function App() {
                 <AlertBox result={selectedResult} />
 
                 <div style={{ display: "grid", gap: 14 }}>
-                  {BIG_CAT_KEYS.map((bigCat) => (
-                    <BigCategorySection key={bigCat} bigCat={bigCat} scores={selectedResult.scores} />
-                  ))}
+                  {BIG_CAT_KEYS.map((bigCat) => <BigCategorySection key={bigCat} bigCat={bigCat} scores={selectedResult.scores} />)}
                 </div>
 
                 <SectionCard title="AI 자동 해석">
@@ -1185,13 +1345,11 @@ export default function App() {
                 <SectionCard title="재검사 비교">
                   {selectedPreviousResult ? (() => {
                     const diff = selectedResult.total - selectedPreviousResult.total;
-                    const catDiffs = CAT_KEYS.map((cat) => ({ cat, diff: selectedResult.scores[cat] - selectedPreviousResult.scores[cat] }))
-                      .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+                    const catDiffs = CAT_KEYS.map((cat) => ({ cat, diff: selectedResult.scores[cat] - selectedPreviousResult.scores[cat] })).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
                     return (
                       <div style={{ display: "grid", gap: 12 }}>
                         <div style={{ background: "#f8f8f8", borderRadius: 12, padding: "13px 14px", fontSize: 13, lineHeight: 1.6, color: "#555" }}>
                           이전 검사({selectedPreviousResult.date}) 대비 총점이 <b>{Math.abs(diff)}점 {diff >= 0 ? "상승" : "하락"}</b>했습니다.
-                          {diff <= -15 ? " 하락 폭이 커서 위험 신호로 함께 반영됩니다." : diff <= -8 ? " 주의 깊은 추적이 필요합니다." : diff >= 8 ? " 긍정적인 개선 추세입니다." : " 큰 변화는 없습니다."}
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
                           {catDiffs.slice(0, 4).map((x) => (
@@ -1230,14 +1388,6 @@ export default function App() {
                         <p style={{ fontSize: 13, lineHeight: 1.6, color: "#555", margin: 0 }}>{item.body}</p>
                       </div>
                     ))}
-                  </div>
-                </SectionCard>
-
-                <SectionCard title="점수 기준">
-                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 13 }}><Pill level="건강">건강</Pill> 14~18점</span>
-                    <span style={{ fontSize: 13 }}><Pill level="보통">보통</Pill> 10~13점</span>
-                    <span style={{ fontSize: 13 }}><Pill level="취약">취약</Pill> 0~9점</span>
                   </div>
                 </SectionCard>
               </div>
@@ -1284,7 +1434,9 @@ export default function App() {
               </SectionCard>
             </div>
 
-            $1
+            <SectionCard title="취약 하위영역 랭킹">
+              <SimpleBarChart data={weakRank.map((w) => ({ label: `${w.cat}. ${CAT_NAMES[w.cat]}`, value: w.count }))} max={Math.max(1, filteredResults.length)} />
+            </SectionCard>
 
             <SectionCard title="AI 조직개선 제안">
               <p style={{ fontSize: 14, lineHeight: 1.65, color: "#444", margin: "0 0 12px" }}>{orgInsight.summary}</p>
@@ -1358,32 +1510,16 @@ export default function App() {
                 </label>
                 <button onClick={clearAllStored} style={{ ...btnBase, background: "#fff", border: "0.5px solid #F09595", color: "#791F1F" }}>저장 데이터 전체 삭제</button>
               </div>
-              <p style={{ fontSize: 12, color: "#999", lineHeight: 1.6, margin: "12px 0 0" }}>현재 버전은 브라우저 localStorage에 저장합니다. 운영 배포 시에는 Firebase Firestore 또는 사내 DB로 저장소를 교체하세요.</p>
+              <p style={{ fontSize: 12, color: "#999", lineHeight: 1.6, margin: "12px 0 0" }}>
+                현재 저장 방식: {cloudStatus === "connected" ? "Firebase Firestore 클라우드 저장" : "브라우저 localStorage 저장"}
+              </p>
             </SectionCard>
 
-            <SectionCard title="Firebase 클라우드 연동 구조">
+            <SectionCard title="클라우드 연결 상태">
               <div style={{ background: "#f8f8f8", borderRadius: 14, padding: 16 }}>
                 <p style={{ fontSize: 13, lineHeight: 1.7, color: "#555", margin: 0 }}>
-                  이 앱의 저장 단위는 <b>SavedResult</b>입니다. Firestore 컬렉션 예시는 <code>stressResults</code>이며, 관리자 대시보드는 해당 컬렉션을 실시간 구독하면 여러 태블릿에서 동기화됩니다.
+                  상단 상태가 <b>☁️ 클라우드 연결</b>이면 여러 기기에서 검사 결과가 같은 Firestore 데이터베이스에 저장됩니다. 환경변수가 없으면 자동으로 로컬 저장 모드로 작동합니다.
                 </p>
-                <pre style={{ overflowX: "auto", margin: "14px 0 0", fontSize: 12, lineHeight: 1.6, color: "#555" }}>{`// Firebase 연결 예시
-// 1) npm i firebase
-// 2) firebaseConfig 입력
-// 3) saveCurrent()에서 setResults 대신 addDoc(collection(db, "stressResults"), result)
-// 4) useEffect에서 onSnapshot(collection(db, "stressResults"), snapshot => setResults(...))
-
-interface SavedResult {
-  id: string;
-  name: string;
-  dept: string;
-  total: number;
-  scores: Record<CatKey, number>;
-  levels: Record<CatKey, Level>;
-  weakCats: CatKey[];
-  riskLevel: "낮음" | "주의" | "위험";
-  createdAt: string;
-  consent: boolean;
-}`}</pre>
               </div>
             </SectionCard>
 
@@ -1399,7 +1535,7 @@ interface SavedResult {
                   <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, alignItems: "center", background: "#f8f8f8", borderRadius: 12, padding: "10px 12px" }}>
                     <div>
                       <p style={{ margin: 0, fontWeight: 700, fontSize: 13 }}>{r.name} · {r.dept}</p>
-                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>{r.date} · {r.total}점 · {r.riskLevel}</p>
+                      <p style={{ margin: "4px 0 0", color: "#888", fontSize: 11 }}>검사일 {r.date} · {r.total}점 · {r.riskLevel}</p>
                     </div>
                     <button onClick={() => { setSelectedId(r.id); setMode("report"); }} style={{ border: "0.5px solid #ccc", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>보기</button>
                     <button onClick={() => deleteResult(r.id)} style={{ border: "0.5px solid #F09595", color: "#791F1F", background: "#fff", borderRadius: 8, padding: "7px 10px", cursor: "pointer" }}>삭제</button>
